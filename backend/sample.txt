@@ -1,0 +1,204 @@
+from flask import Flask, jsonify
+from flask_cors import CORS
+import paramiko
+import subprocess
+import re
+import os
+import json
+from dotenv import load_dotenv
+from influxdb_client import InfluxDBClient, Point
+from influxdb_client.client.write_api import SYNCHRONOUS
+from datetime import datetime
+
+# Load environment variables
+load_dotenv()
+
+app = Flask(__name__)
+CORS(app, supports_credentials=True)
+
+class SDNMonitor:
+    def __init__(self):
+        self.vm101_ip = os.getenv("VM101_IP", "192.168.1.107")
+        self.vm100_ip = os.getenv("VM100_IP", "192.168.1.108")
+        self.vm_user = os.getenv("VM_USER", "satya")
+        self.vm_password = os.getenv("VM_PASSWORD")
+        self.queue_interface = os.getenv("QUEUE_INTERFACE", "ens19")
+
+        self.influx_host = os.getenv("INFLUX_HOST", "localhost")
+        self.influx_port = os.getenv("INFLUX_PORT", "8086")
+        self.influx_bucket = os.getenv("INFLUX_DB", "accss")
+        self.influx_org = os.getenv("INFLUX_ORG", "my-org")
+        self.influx_token = os.getenv("INFLUX_TOKEN")
+
+        self.influx_client = InfluxDBClient(
+            url=f"http://{self.influx_host}:{self.influx_port}",
+            token=self.influx_token,
+            org=self.influx_org
+        )
+        self.write_api = self.influx_client.write_api(write_options=SYNCHRONOUS)
+        self.query_api = self.influx_client.query_api()
+
+    def setup_ssh(self, ip):
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(ip, username=self.vm_user, password=self.vm_password)
+        return client
+
+    def parse_queue_stats(self, output):
+        b = re.search(r'backlog\s+(\d+)b', output)
+        d = re.search(r'dropped\s+(\d+)', output)
+        o = re.search(r'overlimits\s+(\d+)', output)
+        return {
+            "backlog": int(b.group(1)) if b else 0,
+            "drops": int(d.group(1)) if d else 0,
+            "overlimits": int(o.group(1)) if o else 0
+        }
+
+    def fetch_queue_stats(self):
+        ssh = self.setup_ssh(self.vm101_ip)
+        stdin, stdout, _ = ssh.exec_command(f"tc -s qdisc show dev {self.queue_interface}")
+        raw = stdout.read().decode()
+        stats = self.parse_queue_stats(raw)
+        pt = Point("queue_stats")\
+            .tag("source", "vm101")\
+            .time(datetime.utcnow())\
+            .field("backlog", stats["backlog"])\
+            .field("drops", stats["drops"])\
+            .field("overlimits", stats["overlimits"])
+        self.write_api.write(bucket=self.influx_bucket, org=self.influx_org, record=pt)
+        return {"status": "success", "data": stats}
+
+    def parse_traffic_stats(self, output):
+        m = re.search(r'([\d\.]+)\s+(M|G)bits/sec', output)
+        if not m:
+            return {"bandwidth": 0.0}
+        v = float(m.group(1))
+        if m.group(2) == "G":
+            v *= 1000
+        return {"bandwidth": round(v, 2)}
+
+    def fetch_traffic_stats(self):
+        ssh = self.setup_ssh(self.vm100_ip)
+        stdin, stdout, _ = ssh.exec_command(f"iperf3 -c {self.vm101_ip} -t 5")
+        raw = stdout.read().decode()
+        stats = self.parse_traffic_stats(raw)
+        pt = Point("traffic_stats")\
+            .tag("source", "vm100")\
+            .time(datetime.utcnow())\
+            .field("bandwidth", stats["bandwidth"])
+        self.write_api.write(bucket=self.influx_bucket, org=self.influx_org, record=pt)
+        return {"status": "success", "data": stats}
+
+    def collect_dpi_data(self):
+        decoder_script = os.path.join(os.path.dirname(__file__), "dpi_decoder.py")
+        try:
+            res = subprocess.run(
+                ["python3", decoder_script, "-c", "10", "-i", self.queue_interface],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+        except subprocess.TimeoutExpired:
+            return {"status": "error", "message": "dpi_decoder.py timed out"}
+
+        raw = res.stdout + "\n" + res.stderr
+        print("=== DPI RAW OUTPUT ===\n", raw)
+
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return {
+                "status": "error",
+                "message": "Failed to locate JSON in decoder output",
+                "raw_output": raw
+            }
+
+        json_str = raw[start:end+1]
+        try:
+            parsed = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            return {
+                "status": "error",
+                "message": f"JSON decode error: {e}",
+                "raw_json": json_str
+            }
+
+        for proto, count in parsed.get("protocol_counts", {}).items():
+            pt = Point("dpi_stats")\
+                .tag("source", "vm101")\
+                .time(datetime.utcnow())\
+                .field(proto, count)
+            self.write_api.write(bucket=self.influx_bucket, org=self.influx_org, record=pt)
+
+        return {"status": "success"}
+
+    def check_connections(self):
+        results = {
+            "influxdb": {"status": "unknown"},
+            "vm101": {"status": "unknown"},
+            "vm100": {"status": "unknown"},
+        }
+
+        try:
+            self.influx_client.ping()
+            results["influxdb"]["status"] = "success"
+        except Exception as e:
+            results["influxdb"]["status"] = "error"
+            results["influxdb"]["message"] = str(e)
+
+        try:
+            ssh = self.setup_ssh(self.vm101_ip)
+            ssh.close()
+            results["vm101"]["status"] = "success"
+        except Exception as e:
+            results["vm101"]["status"] = "error"
+            results["vm101"]["message"] = str(e)
+
+        try:
+            ssh = self.setup_ssh(self.vm100_ip)
+            ssh.close()
+            results["vm100"]["status"] = "success"
+        except Exception as e:
+            results["vm100"]["status"] = "error"
+            results["vm100"]["message"] = str(e)
+
+        return results
+
+monitor = SDNMonitor()
+
+@app.route("/api/queue-stats")
+def queue_api():
+    return jsonify(monitor.fetch_queue_stats())
+
+@app.route("/api/traffic-stats")
+def traffic_api():
+    return jsonify(monitor.fetch_traffic_stats())
+
+@app.route("/api/dpi-stats")
+def dpi_api():
+    result = monitor.collect_dpi_data()
+    if result["status"] == "error":
+        return jsonify(result), 500
+
+    flux = f'''
+        from(bucket: "{monitor.influx_bucket}")
+        |> range(start: -5m)
+        |> filter(fn: (r) => r._measurement == "dpi_stats")
+    '''
+    tables = monitor.query_api.query(org=monitor.influx_org, query=flux)
+    data = []
+    for table in tables:
+        for record in table.records:
+            data.append({
+                "time": record.get_time().isoformat(),
+                "protocol": record.get_field(),
+                "value": record.get_value()
+            })
+    return jsonify({"status": "success", "data": data})
+
+@app.route("/api/check-connections")
+def connections_api():
+    return jsonify(monitor.check_connections())
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)

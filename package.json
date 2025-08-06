@@ -1,0 +1,14 @@
+{
+  "name": "sdn-monitoring",
+  "version": "1.0.0",
+  "description": "SDN Monitoring System with TIG Stack",
+  "scripts": {
+    "start": "cd frontend && npm start",
+    "build": "cd frontend && npm run build",
+    "backend": "cd backend && python3 app.py",
+    "dev": "concurrently \"npm run start\" \"npm run backend\""
+  },
+  "dependencies": {
+    "concurrently": "^8.2.1"
+  }
+}
