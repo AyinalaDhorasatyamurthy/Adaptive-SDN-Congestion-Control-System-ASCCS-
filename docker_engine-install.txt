@@ -1,0 +1,37 @@
+unzip iot_tig_stack_with_mqtt_using_docker-main.zip
+
+cd iot_tig_stack_with_mqtt_using_docker-main
+ls
+
+Verify that you see files like docker-compose.yml, README.md, and folder(s) for influxdb, grafana, mqtt, etc.
+
+Add Docker’s official GPG key:
+
+sudo apt update
+sudo apt install -y ca-certificates curl gnupg
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo tee /etc/apt/keyrings/docker.asc > /dev/null
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+Set up the Docker repository:
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+sudo apt update
+
+Install Docker Engine & Docker Compose Plugin:
+
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+ Verify Docker Installation:
+    sudo docker run hello-world
+
+(Optional but Recommended): Use Docker Without Sudo):
+sudo usermod -aG docker $USER
+newgrp docker
+
+cd ~/Downloads/iot_tig_stack_with_mqtt_using_docker-main/iot_tig_stack_with_mqtt_using_docker-main
+docker compose up -d
+

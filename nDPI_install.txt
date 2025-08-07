@@ -1,0 +1,70 @@
+sudo apt update
+sudo apt install git cmake libpcap-dev libjson-c-dev libtool autoconf automake -y
+git clone https://github.com/ntop/nDPI.git
+cd nDPI
+make
+sudo make install
+
+sudo apt-get install build-essential libpcap-dev libtool libjson-c-dev pkg-config
+./autogen.sh
+./configure
+make  or make -j$(nproc)
+ 
+sudo make install
+
+./example/ndpiReader -h
+If installed and built correctly, you should see help output like:
+
+php-template
+Copy
+Edit
+Usage:
+  ndpiReader [options] -i <interface>
+  ndpiReader [options] -f <pcap file>
+
+ls /usr/local/lib | grep ndpi
+Should return something like:
+
+Copy
+Edit
+libndpi.so
+libndpi.a
+
+if you face any issues then  
+
+If still not found, let’s manually look inside the nDPI build directory:
+
+find . -name "libndpi.*"
+
+It might print:
+./src/libndpi.a
+./src/.libs/libndpi.so
+
+then;
+sudo cp ./src/.libs/libndpi.so /usr/local/lib/
+sudo cp ./src/libndpi.a /usr/local/lib/
+sudo ldconfig
+
+now,  ls /usr/local/lib | grep ndpi
+
+sudo cp ./src/lib/libndpi.so /usr/local/lib/
+sudo cp ./src/lib/libndpi.a /usr/local/lib/
+sudo cp ./src/lib/libndpi.so.4 /usr/local/lib/
+sudo cp ./src/lib/libndpi.so.4.15.0 /usr/local/lib/
+
+Then reload the dynamic linker cache:
+sudo ldconfig
+
+
+The only small warning you got:
+[This just means that libndpi.so.4 should symbolically point to libndpi.so.4.15.0, but was probably copied as a regular file instead of a symlink.]
+
+/sbin/ldconfig.real: /usr/local/lib/libndpi.so.4 is not a symbolic lin
+
+use :
+sudo rm /usr/local/lib/libndpi.so.4
+sudo ln -s /usr/local/lib/libndpi.so.4.15.0 /usr/local/lib/libndpi.so.4
+sudo ldconfig
+
+now ls /usr/local/lib | grep ndpi
+working
